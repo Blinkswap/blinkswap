@@ -49,6 +49,16 @@ interface IUniswapV2Pair {
     function sync() external;
 
     function initialize(address, address) external;
+
+    function blinkClaim() external;
+    function blinkUpdateLiquidityTime(address) external;
+    function blinkUser(address) external view returns (uint);
+    function blinkTotal() external view returns (uint);
+    function blinkPairUsers(uint) external view returns (address);
+    function blinkPairUsersLength() external view returns (uint);
+    function blinkLiquidityTime(address) external view returns (uint);
+    function blinkLastTimestamp(address) external view returns (uint);
+    function blinkLastRemainder(address) external view returns (uint);
 }
 
 interface IUniswapV2ERC20 {
@@ -90,8 +100,8 @@ library SafeMath {
 contract UniswapV2ERC20 is IUniswapV2ERC20 {
     using SafeMath for uint;
 
-    string public constant name = 'Uniswap V2';
-    string public constant symbol = 'UNI-V2';
+    string public constant name = 'Blinkswap LP';
+    string public constant symbol = 'BLINK-LP';
     uint8 public constant decimals = 18;
     uint  public totalSupply;
     mapping(address => uint) public balanceOf;
@@ -125,12 +135,14 @@ contract UniswapV2ERC20 is IUniswapV2ERC20 {
         totalSupply = totalSupply.add(value);
         balanceOf[to] = balanceOf[to].add(value);
         emit Transfer(address(0), to, value);
+        IUniswapV2Pair(address(this)).blinkUpdateLiquidityTime(to);
     }
 
     function _burn(address from, uint value) internal {
         balanceOf[from] = balanceOf[from].sub(value);
         totalSupply = totalSupply.sub(value);
         emit Transfer(from, address(0), value);
+        IUniswapV2Pair(address(this)).blinkUpdateLiquidityTime(from);
     }
 
     function _approve(address owner, address spender, uint value) private {
@@ -142,6 +154,8 @@ contract UniswapV2ERC20 is IUniswapV2ERC20 {
         balanceOf[from] = balanceOf[from].sub(value);
         balanceOf[to] = balanceOf[to].add(value);
         emit Transfer(from, to, value);
+        IUniswapV2Pair(address(this)).blinkUpdateLiquidityTime(from);
+        IUniswapV2Pair(address(this)).blinkUpdateLiquidityTime(to);
     }
 
     function approve(address spender, uint value) external returns (bool) {
@@ -242,12 +256,86 @@ interface IUniswapV2Factory {
     function setFeeTo(address) external;
     function setFeeToSetter(address) external;
 
-    function blinkFee() external view returns(uint); //BLINK
+    function blinkFee() external view returns (uint);
+    function blinkFeeMul() external view returns (uint);
+    function blinkUsers(uint) external view returns (address);
+    function blinkUsersLength() external view returns (uint);
+    function blinkVolume(address) external view returns (uint);
+    function blinkPush(address, address, uint, uint) external returns (bool);
+    function blinkSettings(address, uint, uint, bool) external;
 }
 
 interface IUniswapV2Callee {
     function uniswapV2Call(address sender, uint amount0, uint amount1, bytes calldata data) external;
 }
+
+interface IBlast {
+
+    enum YieldMode {
+        AUTOMATIC,
+        VOID,
+        CLAIMABLE
+    }
+
+    enum GasMode {
+        VOID,
+        CLAIMABLE
+    }
+
+    // configure
+    function configureContract(address contractAddress, YieldMode _yield, GasMode gasMode, address governor) external;
+    function configure(YieldMode _yield, GasMode gasMode, address governor) external;
+
+    // base configuration options
+    function configureClaimableYield() external;
+    function configureClaimableYieldOnBehalf(address contractAddress) external;
+    function configureAutomaticYield() external;
+    function configureAutomaticYieldOnBehalf(address contractAddress) external;
+    function configureVoidYield() external;
+    function configureVoidYieldOnBehalf(address contractAddress) external;
+    function configureClaimableGas() external;
+    function configureClaimableGasOnBehalf(address contractAddress) external;
+    function configureVoidGas() external;
+    function configureVoidGasOnBehalf(address contractAddress) external;
+    function configureGovernor(address _governor) external;
+    function configureGovernorOnBehalf(address _newGovernor, address contractAddress) external;
+
+    // claim yield
+    function claimYield(address contractAddress, address recipientOfYield, uint256 amount) external returns (uint256);
+    function claimAllYield(address contractAddress, address recipientOfYield) external returns (uint256);
+
+    // claim gas
+    function claimAllGas(address contractAddress, address recipientOfGas) external returns (uint256);
+    function claimGasAtMinClaimRate(address contractAddress, address recipientOfGas, uint256 minClaimRateBips) external returns (uint256);
+    function claimMaxGas(address contractAddress, address recipientOfGas) external returns (uint256);
+    function claimGas(address contractAddress, address recipientOfGas, uint256 gasToClaim, uint256 gasSecondsToConsume) external returns (uint256);
+
+    // read functions
+    function readClaimableYield(address contractAddress) external view returns (uint256);
+    function readYieldConfiguration(address contractAddress) external view returns (uint8);
+    function readGasParams(address contractAddress) external view returns (uint256 etherSeconds, uint256 etherBalance, uint256 lastUpdated, GasMode);
+}
+
+interface IBlastPoints {
+	function configurePointsOperator(address operator) external;
+}
+
+interface IERC20Rebasing {
+    enum YieldMode {
+        AUTOMATIC,
+        VOID,
+        CLAIMABLE
+        }
+  // changes the yield mode of the caller and update the balance
+  // to reflect the configuration
+  function configure(YieldMode) external returns (uint256);
+  // "claimable" yield mode accounts can call this this claim their yield
+  // to another address
+  function claim(address recipient, uint256 amount) external returns (uint256);
+  // read the claimable amount for an account
+  function getClaimableAmount(address account) external view returns (uint256);
+}
+
 
 contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
     using SafeMath  for uint;
@@ -267,14 +355,18 @@ contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
     uint public price0CumulativeLast;
     uint public price1CumulativeLast;
     uint public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event
-
-
-    uint public blinkTotalLiquidityTimestamp; //BLINK
-    mapping(address => uint) public blinkUserLiquidityTimestamp; //BLINK
-    mapping(address => uint) public blinkUserLastTimestamp; //BLINK
-    mapping(address => uint) public blinkUserLastRemainder; //BLINK
-
     uint private unlocked = 1;
+
+
+    address [] public blinkPairUsers;
+    mapping(address => uint) public blinkLiquidityTime;
+    mapping(address => uint) public blinkLastTimestamp;
+    mapping(address => uint) public blinkLastRemainder;
+    IBlast private constant BLAST = IBlast(0x4300000000000000000000000000000000000002); 
+    IERC20Rebasing private constant USDB = IERC20Rebasing(0x4300000000000000000000000000000000000003);
+    IERC20Rebasing private constant WETH = IERC20Rebasing(0x4300000000000000000000000000000000000004);
+    IBlastPoints private constant POINTS = IBlastPoints(0x2536FE9ab3F511540F2f9e2eC2A805005C3Dd800);
+
     modifier lock() {
         require(unlocked == 1, 'UniswapV2: LOCKED');
         unlocked = 0;
@@ -315,21 +407,56 @@ contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
         token0 = _token0;
         token1 = _token1;
 
+        USDB.configure(IERC20Rebasing.YieldMode.CLAIMABLE);
+        WETH.configure(IERC20Rebasing.YieldMode.CLAIMABLE);
+        BLAST.configureClaimableGas();
+        POINTS.configurePointsOperator(0x08E413dc2EB2F7FF3E6d972FF78270EBfAF4f013);
+    }
 
-        //BLINK on Blast
-        bool success;
-        if (_token0 == 0x4200000000000000000000000000000000000022 || _token1 == 0x4200000000000000000000000000000000000022) {
-            (success, ) = address(0x4200000000000000000000000000000000000022).call(abi.encodeWithSignature("configure(uint8)",uint8(2)));
-            require(success);
+    function blinkPairUsersLength() external view returns (uint) {
+        return blinkPairUsers.length;
+    }
+
+    function blinkUser(address user) external view returns (uint) {
+        return blinkLiquidityTime[user].add((block.timestamp.sub(blinkLastTimestamp[user])).mul(blinkLastRemainder[user]));
+    }
+
+    function blinkTotal() external view returns (uint) {
+        uint total;
+        uint length = blinkPairUsers.length;
+        for (uint i; i < length; ++i) {
+            address user = blinkPairUsers[i];
+            uint amount = blinkLiquidityTime[user];
+            uint lastRemainder = blinkLastRemainder[user];
+            if (lastRemainder > 0) amount += (block.timestamp.sub(blinkLastTimestamp[user])).mul(lastRemainder);
+            total += amount;
         }
-        if (_token0 == 0x4200000000000000000000000000000000000023 || _token1 == 0x4200000000000000000000000000000000000023) {
-            (success, ) = address(0x4200000000000000000000000000000000000023).call(abi.encodeWithSignature("configure(uint8)",uint8(2)));
-            require(success);
+        return total;
+    }
+
+    function blinkUpdateLiquidityTime(address user) external {
+        if (IUniswapV2Factory(factory).blinkPush(token0, token1, 0, 0) == false) {
+            uint lastTimestamp = blinkLastTimestamp[user];
+            uint lastRemainder = blinkLastRemainder[user];
+            if (lastTimestamp == 0) blinkPairUsers.push(user);
+            if (lastRemainder > 0) {
+                if (block.timestamp.sub(lastTimestamp) > 0) {
+                blinkLiquidityTime[user] += (block.timestamp.sub(lastTimestamp)).mul(lastRemainder);
+                }
+            }
+            blinkLastRemainder[user] = balanceOf[user];
+            blinkLastTimestamp[user] = block.timestamp;
         }
-        (success, ) = address(0x4300000000000000000000000000000000000002).call(abi.encodeWithSignature("configureClaimableGas()"));
-        require(success);
-        (success, ) = address(0x4300000000000000000000000000000000000002).call(abi.encodeWithSignature("configureGovernor(address)", IUniswapV2Factory(factory).feeTo()));
-        require(success);
+    }
+
+    function blinkClaim() external {
+        address feeTo = IUniswapV2Factory(factory).feeTo();
+        uint amountWETH = WETH.getClaimableAmount(address(this));
+        uint amountUSDB = USDB.getClaimableAmount(address(this));
+        (,uint amountETH,,) = BLAST.readGasParams(address(this));
+        if (amountWETH > 0) WETH.claim(feeTo, amountWETH);
+        if (amountUSDB > 0) USDB.claim(feeTo, amountUSDB);
+        if (amountETH > 0) BLAST.claimMaxGas(address(this), feeTo);
     }
 
     // update reserves and, on the first call per block, price accumulators
@@ -348,12 +475,11 @@ contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
         emit Sync(reserve0, reserve1);
     }
 
-    // if fee is on, mint liquidity equivalent to 1/6th of the growth in sqrt(k)
+    // if fee is on, mint liquidity equivalent to 1/6th*blinkFeeMultiplier of the growth in sqrt(k)
     function _mintFee(uint112 _reserve0, uint112 _reserve1) private returns (bool feeOn) {
         address feeTo = IUniswapV2Factory(factory).feeTo();
         feeOn = feeTo != address(0);
         uint _kLast = kLast; // gas savings
-        uint blinkFee = IUniswapV2Factory(factory).blinkFee();
         if (feeOn) {
             if (_kLast != 0) {
                 uint rootK = Math.sqrt(uint(_reserve0).mul(_reserve1));
@@ -361,27 +487,13 @@ contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
                 if (rootK > rootKLast) {
                     uint numerator = totalSupply.mul(rootK.sub(rootKLast));
                     uint denominator = rootK.mul(5).add(rootKLast);
-                    uint liquidity = (numerator / denominator).mul(blinkFee); //BLINK
+                    uint liquidity = (numerator / denominator).mul(IUniswapV2Factory(factory).blinkFeeMul());
                     if (liquidity > 0) _mint(feeTo, liquidity);
                 }
             }
         } else if (_kLast != 0) {
             kLast = 0;
         }
-    }
-    //BLINK
-    function _blinkAdd(address to) private {
-        uint blinkLastTimestamp = blinkUserLastTimestamp[to];
-        uint blinkLastRemainder = blinkUserLastRemainder[to];
-        uint blockTimestamp = block.timestamp;
-
-        if (blinkLastRemainder != 0) {
-        blinkTotalLiquidityTimestamp += (blockTimestamp.sub(blinkLastTimestamp)).mul(blinkLastRemainder);
-        blinkUserLiquidityTimestamp[to] += (blockTimestamp.sub(blinkLastTimestamp)).mul(blinkLastRemainder);
-        }
-
-        blinkUserLastRemainder[to] = balanceOf[to];
-        blinkUserLastTimestamp[to] = blockTimestamp;
     }
 
     // this low-level function should be called from a contract which performs important safety checks
@@ -402,8 +514,6 @@ contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
         }
         require(liquidity > 0, 'UniswapV2: INSUFFICIENT_LIQUIDITY_MINTED');
         _mint(to, liquidity);
-
-        _blinkAdd(to); //BLINK
 
         _update(balance0, balance1, _reserve0, _reserve1);
         if (feeOn) kLast = uint(reserve0).mul(reserve1); // reserve0 and reserve1 are up-to-date
@@ -429,8 +539,6 @@ contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
         _safeTransfer(_token1, to, amount1);
         balance0 = IERC20(_token0).balanceOf(address(this));
         balance1 = IERC20(_token1).balanceOf(address(this));
-
-        _blinkAdd(to); //BLINK
 
         _update(balance0, balance1, _reserve0, _reserve1);
         if (feeOn) kLast = uint(reserve0).mul(reserve1); // reserve0 and reserve1 are up-to-date
@@ -459,14 +567,15 @@ contract BlinkPair is IUniswapV2Pair, UniswapV2ERC20 {
         uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
         require(amount0In > 0 || amount1In > 0, 'UniswapV2: INSUFFICIENT_INPUT_AMOUNT');
         { // scope for reserve{0,1}Adjusted, avoids stack too deep errors
-        uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
-        uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
-        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
+        uint blinkFee = IUniswapV2Factory(factory).blinkFee();
+        uint balance0Adjusted = balance0.mul(10000).sub(amount0In.mul(blinkFee));
+        uint balance1Adjusted = balance1.mul(10000).sub(amount1In.mul(blinkFee));
+        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(10000**2), 'UniswapV2: K');
         }
-
-
+        
         _update(balance0, balance1, _reserve0, _reserve1);
         emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+        if (data.length == 0) IUniswapV2Factory(factory).blinkPush(token0, token1, amount0In.add(amount0Out), amount1In.add(amount1Out));
     }
 
     // force balances to match reserves
