@@ -15,6 +15,8 @@ interface IUniswapV2Factory {
 
     function setFeeTo(address) external;
     function setFeeToSetter(address) external;
+
+    function blinkFee() external view returns (uint);
 }
 
 interface IUniswapV2Pair {
@@ -156,8 +158,8 @@ interface IUniswapV2Router01 {
         returns (uint[] memory amounts);
 
     function quote(uint amountA, uint reserveA, uint reserveB) external pure returns (uint amountB);
-    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
-    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external pure returns (uint amountIn);
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external view returns (uint amountOut);
+    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external view returns (uint amountIn);
     function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
     function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts);
 }
@@ -242,6 +244,7 @@ library SafeMath {
 library UniswapV2Library {
     using SafeMath for uint;
 
+
     // returns sorted token addresses, used to handle return values from pairs sorted in this order
     function sortTokens(address tokenA, address tokenB) internal pure returns (address token0, address token1) {
         require(tokenA != tokenB, 'UniswapV2Library: IDENTICAL_ADDRESSES');
@@ -256,7 +259,7 @@ library UniswapV2Library {
                 hex'ff',
                 factory,
                 keccak256(abi.encodePacked(token0, token1)),
-                hex'91da2e9296efccbfe8fdf161c000e694ab9724b08ac1e74f1c2b9c9a374721ee' // init code hash
+                hex'b8cf32798af7f7260635b2d7d4030078ef40230db8dc08b5e9874019a3ba8419' // init code hash
             ))));
     }
 
@@ -275,21 +278,21 @@ library UniswapV2Library {
     }
 
     // given an input amount of an asset and pair reserves, returns the maximum output amount of the other asset
-    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) internal pure returns (uint amountOut) {
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) internal view returns (uint amountOut) {
         require(amountIn > 0, 'UniswapV2Library: INSUFFICIENT_INPUT_AMOUNT');
         require(reserveIn > 0 && reserveOut > 0, 'UniswapV2Library: INSUFFICIENT_LIQUIDITY');
-        uint amountInWithFee = amountIn.mul(997);
+        uint amountInWithFee = amountIn.mul(10000 - IUniswapV2Factory(0xFfbDb302f29B29ee45D650DF44889450d252d868).blinkFee());
         uint numerator = amountInWithFee.mul(reserveOut);
-        uint denominator = reserveIn.mul(1000).add(amountInWithFee);
+        uint denominator = reserveIn.mul(10000).add(amountInWithFee);
         amountOut = numerator / denominator;
     }
 
     // given an output amount of an asset and pair reserves, returns a required input amount of the other asset
-    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) internal pure returns (uint amountIn) {
+    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) internal view returns (uint amountIn) {
         require(amountOut > 0, 'UniswapV2Library: INSUFFICIENT_OUTPUT_AMOUNT');
         require(reserveIn > 0 && reserveOut > 0, 'UniswapV2Library: INSUFFICIENT_LIQUIDITY');
-        uint numerator = reserveIn.mul(amountOut).mul(1000);
-        uint denominator = reserveOut.sub(amountOut).mul(997);
+        uint numerator = reserveIn.mul(amountOut).mul(10000);
+        uint denominator = reserveOut.sub(amountOut).mul(10000 - IUniswapV2Factory(0xFfbDb302f29B29ee45D650DF44889450d252d868).blinkFee());
         amountIn = (numerator / denominator).add(1);
     }
 
@@ -341,31 +344,77 @@ library TransferHelper {
     }
 }
 
-contract UniswapV2Router02 is IUniswapV2Router02 {
+interface IBlast {
+
+    enum YieldMode {
+        AUTOMATIC,
+        VOID,
+        CLAIMABLE
+    }
+
+    enum GasMode {
+        VOID,
+        CLAIMABLE
+    }
+
+    // configure
+    function configureContract(address contractAddress, YieldMode _yield, GasMode gasMode, address governor) external;
+    function configure(YieldMode _yield, GasMode gasMode, address governor) external;
+
+    // base configuration options
+    function configureClaimableYield() external;
+    function configureClaimableYieldOnBehalf(address contractAddress) external;
+    function configureAutomaticYield() external;
+    function configureAutomaticYieldOnBehalf(address contractAddress) external;
+    function configureVoidYield() external;
+    function configureVoidYieldOnBehalf(address contractAddress) external;
+    function configureClaimableGas() external;
+    function configureClaimableGasOnBehalf(address contractAddress) external;
+    function configureVoidGas() external;
+    function configureVoidGasOnBehalf(address contractAddress) external;
+    function configureGovernor(address _governor) external;
+    function configureGovernorOnBehalf(address _newGovernor, address contractAddress) external;
+
+    // claim yield
+    function claimYield(address contractAddress, address recipientOfYield, uint256 amount) external returns (uint256);
+    function claimAllYield(address contractAddress, address recipientOfYield) external returns (uint256);
+
+    // claim gas
+    function claimAllGas(address contractAddress, address recipientOfGas) external returns (uint256);
+    function claimGasAtMinClaimRate(address contractAddress, address recipientOfGas, uint256 minClaimRateBips) external returns (uint256);
+    function claimMaxGas(address contractAddress, address recipientOfGas) external returns (uint256);
+    function claimGas(address contractAddress, address recipientOfGas, uint256 gasToClaim, uint256 gasSecondsToConsume) external returns (uint256);
+
+    // read functions
+    function readClaimableYield(address contractAddress) external view returns (uint256);
+    function readYieldConfiguration(address contractAddress) external view returns (uint8);
+    function readGasParams(address contractAddress) external view returns (uint256 etherSeconds, uint256 etherBalance, uint256 lastUpdated, GasMode);
+}
+
+
+contract BlinkRouter is IUniswapV2Router02 {
     using SafeMath for uint;
 
-    address public immutable override factory;
-    address public immutable override WETH;
+    address public constant override factory = 0xFfbDb302f29B29ee45D650DF44889450d252d868;
+    address public constant override WETH = 0x4200000000000000000000000000000000000004;
+
 
     modifier ensure(uint deadline) {
         require(deadline >= block.timestamp, 'UniswapV2Router: EXPIRED');
         _;
     }
 
-    constructor(address _factory, address _WETH) public {
-        factory = _factory;
-        WETH = _WETH;
-
-        //BLINK on Blast
-        bool success;
-        (success, ) = address(0x4300000000000000000000000000000000000002).call(abi.encodeWithSignature("configureClaimableGas()"));
-        require(success);
-        (success, ) = address(0x4300000000000000000000000000000000000002).call(abi.encodeWithSignature("configureGovernor(address)", IUniswapV2Factory(_factory).feeTo()));
-        require(success);
+    constructor() public {
+        IBlast(0x4300000000000000000000000000000000000002).configureClaimableGas();
     }
 
     receive() external payable {
         assert(msg.sender == WETH); // only accept ETH via fallback from the WETH contract
+    }
+
+    function blinkClaim() external {
+        (,uint amountETH,,) = IBlast(0x4300000000000000000000000000000000000002).readGasParams(address(this));
+        if (amountETH > 0) IBlast(0x4300000000000000000000000000000000000002).claimMaxGas(address(this), IUniswapV2Factory(factory).feeTo());
     }
 
     // **** ADD LIQUIDITY ****
@@ -745,7 +794,7 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
 
     function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut)
         public
-        pure
+        view
         virtual
         override
         returns (uint amountOut)
@@ -755,7 +804,7 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
 
     function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut)
         public
-        pure
+        view
         virtual
         override
         returns (uint amountIn)
