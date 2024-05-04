@@ -396,7 +396,7 @@ contract BlinkRouter is IUniswapV2Router02 {
     using SafeMath for uint;
 
     address public constant override factory = 0xFfbDb302f29B29ee45D650DF44889450d252d868;
-    address public constant override WETH = 0x4200000000000000000000000000000000000004;
+    address public constant override WETH = 0x4300000000000000000000000000000000000004;
 
 
     modifier ensure(uint deadline) {
